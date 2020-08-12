@@ -22,12 +22,120 @@ provider "aws" {
 data "aws_availability_zones" "all" {}
 
 
+# ----------------------------------------------------------------------------------------------------------------------
+# vpc
+# ----------------------------------------------------------------------------------------------------------------------
+resource "aws_vpc" "qdb-vpc" {
+    cidr_block = "10.0.0.0/16"
+    enable_dns_support = "true"
+    enable_dns_hostnames = "true"
+    tags {
+        name = "qdb-vpc"
+    }
+}
+
+# ----------------------------------------------------------------------------------------------------------------------
+# subnets
+# ----------------------------------------------------------------------------------------------------------------------
+resource "aws_subnet" "qdb-public-1" {
+    vpc_id = "${aws_vpc.qdb-vpc.id}"
+    cidr_block = "10.0.1.0/24"
+    availability_zone = data.aws_availability_zones.available.names[1]
+
+    tags {
+        name = "qdb-public-1"
+    }
+}
+
+resource "aws_subnet" "qdb-private-1" {
+    vpc_id = "${aws_vpc.qdb-vpc.id}"
+    cidr_block = "10.0.3.0/24"
+    availability_zone = data.aws_availability_zones.available.names[1]
+
+    tags {
+        name = "qdb-private-1"
+    }
+}
+
+# ----------------------------------------------------------------------------------------------------------------------
+# gw
+# ----------------------------------------------------------------------------------------------------------------------
+resource "aws_internet_gateway" "qdb-gw" {
+    vpc_id = "${aws_vpc.qdb-vpc.id}"
+
+    tags {
+        name = "qdb-gw"
+    }
+}
+
+# ----------------------------------------------------------------------------------------------------------------------
+# rt
+# ----------------------------------------------------------------------------------------------------------------------
+
+resource "aws_route_table" "qdb-public-1" {
+    vpc_id = "${aws_vpc.qdb-vpc.id}"
+    route {
+        cidr_block = "0.0.0.0/0"
+        gateway_id = "${aws_internet_gateway.qdb-gw.id}"
+    }
+
+    tags {
+        name = "qdb-public-1"
+    }
+}
+
+# ----------------------------------------------------------------------------------------------------------------------
+# rta
+# ----------------------------------------------------------------------------------------------------------------------
+
+resource "aws_route_table_association" "qdb-public-1-a" {
+    subnet_id = "${aws_subnet.qdb-public-1.id}"
+    route_table_id = "${aws_route_table.qdb-public-1.id}"
+}
+
+# ----------------------------------------------------------------------------------------------------------------------
+# ng
+# ----------------------------------------------------------------------------------------------------------------------
+
+resource "aws_eip" "qdb-nat" {
+vpc      = true
+}
+resource "aws_nat_gateway" "qdb-nat-gw" {
+    allocation_id = "${aws_eip.qdb-nat.id}"
+    subnet_id = "${aws_subnet.qdb-public-1.id}"
+    depends_on = ["aws_internet_gateway.qdb-gw"]
+}
+# ----------------------------------------------------------------------------------------------------------------------
+# vpc for nat
+# ----------------------------------------------------------------------------------------------------------------------
+
+resource "aws_route_table" "qdb-private" {
+    vpc_id = "${aws_vpc.qdb-vpc.id}"
+    route {
+        cidr_block = "0.0.0.0/0"
+        nat_gateway_id = "${aws_nat_gateway.qdb-nat-gw.id}"
+    }
+
+    tags {
+        name = "qdb-private-1"
+    }
+}
+
+# ----------------------------------------------------------------------------------------------------------------------
+# private routes
+# ----------------------------------------------------------------------------------------------------------------------
+resource "aws_route_table_association" "qdb-private-1-a" {
+    subnet_id = "${aws_subnet.qdb-private-1.id}"
+    route_table_id = "${aws_route_table.qdb-private.id}"
+}
+
+
 #---------------------------------------------------------------------------------------------------
 # adding iam role
 #-------------------------------------------------------------------------------------------------
 
-resource "aws_iam_role" "test_role" {
-  name = "test_role"
+resource "aws_iam_role" "qdb_role" {
+  name = "qdb_role"
 
   assume_role_policy = <<EOF
 {
@@ -55,9 +163,9 @@ EOF
 # create instance Profile
 # ---------------------------------------------------------------------------------------------------------------------
 
-resource "aws_iam_instance_profile" "test_profile" {
-  name = "test_profile"
-  role = "${aws_iam_role.test_role.name}"
+resource "aws_iam_instance_profile" "qdb_profile" {
+  name = "qdb_profile"
+  role = "${aws_iam_role.qdb_role.name}"
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -66,9 +174,9 @@ resource "aws_iam_instance_profile" "test_profile" {
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-resource "aws_iam_role_policy" "test_policy" {
-  name = "test_policy"
-  role = "${aws_iam_role.test_role.id}"
+resource "aws_iam_role_policy" "qdb_policy" {
+  name = "qdb_policy"
+  role = "${aws_iam_role.qdb_role.id}"
 
   policy = <<EOF
 {
@@ -91,20 +199,21 @@ EOF
 # create the auto scaling group
 # ---------------------------------------------------------------------------------------------------------------------
 
-resource "aws_autoscaling_group" "example-autoscaling" {
-  name = "example-autoscaling"
-  launch_configuration = aws_launch_configuration.example.id
+resource "aws_autoscaling_group" "qdb-autoscaling" {
+  name = "qdb-autoscaling"
+  launch_configuration = aws_launch_configuration.qdb.id
   availability_zones   = data.aws_availability_zones.all.names
+                         
 
   min_size = 1
   max_size = 3
 
-  load_balancers    = [aws_elb.example.name]
+  load_balancers    = [aws_elb.qdb.name]
   health_check_type = "elb"
 
   tag {
     key                 = "name"
-    value               = "terraform-asg-example"
+    value               = "terraform-asg-qdb"
     propagate_at_launch = true
   }
 }
@@ -113,12 +222,13 @@ resource "aws_autoscaling_group" "example-autoscaling" {
 # create a launch configuration that defines each ec2 instance in the asg
 # ---------------------------------------------------------------------------------------------------------------------
 
-resource "aws_launch_configuration" "example" {
+resource "aws_launch_configuration" "qdb" {
   # ubuntu server 18.04 lts
   image_id        = "ami-0c55b159cbfafe1f0"
   instance_type   = "t2.micro"
-  iam_instance_profile = "${aws_iam_instance_profile.test_profile.name}"
+  iam_instance_profile = "${aws_iam_instance_profile.qdb_profile.name}"
   security_groups = [aws_security_group.instance.id]
+  subnet_id = "${aws_subnet.qdb-private-1.name}"
 
   user_data = <<-eof
               #! /bin/bash
@@ -139,7 +249,7 @@ resource "aws_launch_configuration" "example" {
 # ---------------------------------------------------------------------------------------------------------------------
 
 resource "aws_security_group" "instance" {
-  name = "terraform-example-instance"
+  name = "terraform-qdb-instance"
 
   # inbound http from anywhere
   ingress {
@@ -154,8 +264,8 @@ resource "aws_security_group" "instance" {
 # create an elb to route traffic across the auto scaling group
 # ---------------------------------------------------------------------------------------------------------------------
 
-resource "aws_elb" "example" {
-  name               = "${aws_autoscaling_group.example-autoscaling.name}"
+resource "aws_elb" "qdb" {
+  name               = "${aws_autoscaling_group.qdb-autoscaling.name}"
   security_groups    = [aws_security_group.elb.id]
   availability_zones = data.aws_availability_zones.all.names
 
@@ -181,7 +291,7 @@ resource "aws_elb" "example" {
 # ---------------------------------------------------------------------------------------------------------------------
 
 resource "aws_security_group" "elb" {
-  name = "terraform-example-elb"
+  name = "terraform-qdb-elb"
 
   # allow all outbound
   egress {
@@ -202,20 +312,20 @@ resource "aws_security_group" "elb" {
 
 # scale up alarm
 
-resource "aws_autoscaling_policy" "example-cpu-policy" {
+resource "aws_autoscaling_policy" "qdb-cpu-policy" {
 
-    name = "example-cpu-policy"
-    autoscaling_group_name = "${aws_autoscaling_group.example-autoscaling.name}"
+    name = "qdb-cpu-policy"
+    autoscaling_group_name = "${aws_autoscaling_group.qdb-autoscaling.name}"
     adjustment_type = "ChangeInCapacity"
     scaling_adjustment = "1"
     cooldown = "300"
     policy_type = "SimpleScaling"
 }
 
-resource "aws_cloudwatch_metric_alarm" "example-cpu-alarm" {
+resource "aws_cloudwatch_metric_alarm" "qdb-cpu-alarm" {
 
-    alarm_name = "example-cpu-alarm"
-    alarm_description = "example-cpu-alarm"
+    alarm_name = "qdb-cpu-alarm"
+    alarm_description = "qdb-cpu-alarm"
     comparison_operator = "GreaterThanOrEqualToThreshold"
     evaluation_periods = "2"
     metric_name = "CPUUtilization"
@@ -224,26 +334,26 @@ resource "aws_cloudwatch_metric_alarm" "example-cpu-alarm" {
     statistic = "Average"
     threshold = "80"
     dimensions = {
-    "AutoScalingGroupName" = "${aws_autoscaling_group.example-autoscaling.name}"
+    "AutoScalingGroupName" = "${aws_autoscaling_group.qdb-autoscaling.name}"
 
     }
     actions_enabled = true
-    alarm_actions = ["${aws_autoscaling_policy.example-cpu-policy.arn}"]
+    alarm_actions = ["${aws_autoscaling_policy.qdb-cpu-policy.arn}"]
 }
 
 # scale down alarm
-resource "aws_autoscaling_policy" "example-cpu-policy-scaledown" {
-    name = "example-cpu-policy-scaledown"
-    autoscaling_group_name = "${aws_autoscaling_group.example-autoscaling.name}"
+resource "aws_autoscaling_policy" "qdb-cpu-policy-scaledown" {
+    name = "qdb-cpu-policy-scaledown"
+    autoscaling_group_name = "${aws_autoscaling_group.qdb-autoscaling.name}"
     adjustment_type = "ChangeInCapacity"
     scaling_adjustment = "-1"
     cooldown = "300"
     policy_type = "SimpleScaling"
 }
 
-resource "aws_cloudwatch_metric_alarm" "example-cpu-alarm-scaledown" {
-    alarm_name = "example-cpu-alarm-scaledown"
-    alarm_description = "example-cpu-alarm-scaledown"
+resource "aws_cloudwatch_metric_alarm" "qdb-cpu-alarm-scaledown" {
+    alarm_name = "qdb-cpu-alarm-scaledown"
+    alarm_description = "qdb-cpu-alarm-scaledown"
     comparison_operator = "LessThanOrEqualToThreshold"
     evaluation_periods = "2"
     metric_name = "CPUUtilization"
@@ -252,10 +362,10 @@ resource "aws_cloudwatch_metric_alarm" "example-cpu-alarm-scaledown" {
     statistic = "Average"
     threshold = "60"
     dimensions = {
-    "AutoScalingGroupName" = "${aws_autoscaling_group.example-autoscaling.name}"
+    "AutoScalingGroupName" = "${aws_autoscaling_group.qdb-autoscaling.name}"
     }
     actions_enabled = true
-    alarm_actions = ["${aws_autoscaling_policy.example-cpu-policy-scaledown.arn}"]
+    alarm_actions = ["${aws_autoscaling_policy.qdb-cpu-policy-scaledown.arn}"]
     }
 
 resource "aws_s3_bucket_object" "file_upload" {
