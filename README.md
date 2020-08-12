@@ -7,8 +7,6 @@
   * [Prerequisites](#prerequisites)
   * [Installation](#installation)
 
-<!-- High level architecture diagram -->
-![Alt text](terra1.png?raw=true "Title")
 
 <!-- ABOUT THE PROJECT -->
 ## About The Project
